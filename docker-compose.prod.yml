@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: legaldocai
+      POSTGRES_USER: legaldocai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./database/seed_templates.sql:/docker-entrypoint-initdb.d/02-seed.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - legaldocai-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U legaldocai"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - legaldocai-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://legaldocai:${POSTGRES_PASSWORD}@postgres:5432/legaldocai
+      - REDIS_URL=redis://redis:6379
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/gcp-key.json
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGINS=https://${DOMAIN_NAME}
+      - GCS_BUCKET_NAME=${GCS_BUCKET_NAME}
+    volumes:
+      - ${GOOGLE_APPLICATION_CREDENTIALS}:/app/credentials/gcp-key.json:ro
+      - uploaded_documents:/app/uploads
+    ports:
+      - "8000:8000"
+    networks:
+      - legaldocai-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # Frontend React App
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+    environment:
+      - REACT_APP_API_URL=https://${DOMAIN_NAME}/api/v1
+      - REACT_APP_FIREBASE_API_KEY=${FIREBASE_API_KEY}
+      - REACT_APP_FIREBASE_AUTH_DOMAIN=${FIREBASE_AUTH_DOMAIN}
+      - REACT_APP_FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - legaldocai-network
+    depends_on:
+      - backend
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+
+  # Nginx Load Balancer (optional for production)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    networks:
+      - legaldocai-network
+    depends_on:
+      - backend
+      - frontend
+
+networks:
+  legaldocai-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploaded_documents:
+    driver: local
